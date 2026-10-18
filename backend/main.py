@@ -1,5 +1,6 @@
 import asyncio
 import itertools
+import os
 import random
 import time
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -10,7 +11,8 @@ app = FastAPI(title="FocusPane SCADA Engine")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Comma-separated list, e.g. "https://focuspane.vercel.app"; defaults to any origin
+    allow_origins=os.environ.get("ALLOWED_ORIGINS", "*").split(","),
     allow_credentials=False,  # wildcard origins cannot be combined with credentials
     allow_methods=["*"],
     allow_headers=["*"],
@@ -25,13 +27,16 @@ class AlarmEvent(BaseModel):
     timestamp: float
     status: str
 
-# Mock SCADA tag topology map
+# Mock SCADA tag catalog. Keep in sync with src/plant.ts.
 TAG_CATALOG = [
-    {"tag": "PUMP-101A", "desc": "Feed Water Pump High Vibration", "base_impact": 0.85},
-    {"tag": "VALVE-204", "desc": "Main Steam Line Pressure Relief Open", "base_impact": 0.92},
-    {"tag": "TEMP-302", "desc": "Reactor Vessel Core Temp High", "base_impact": 0.98},
-    {"tag": "FLOW-105", "desc": "Coolant Loop Low Flow Rate", "base_impact": 0.74},
     {"tag": "ELEC-401", "desc": "Substation B Bus Voltage Sag", "base_impact": 0.60},
+    {"tag": "LEVEL-110", "desc": "Deaerator Tank Level Low", "base_impact": 0.68},
+    {"tag": "COMP-501", "desc": "Instrument Air Compressor Trip", "base_impact": 0.71},
+    {"tag": "PUMP-101A", "desc": "Feed Water Pump High Vibration", "base_impact": 0.85},
+    {"tag": "FLOW-105", "desc": "Coolant Loop Low Flow Rate", "base_impact": 0.74},
+    {"tag": "TEMP-302", "desc": "Reactor Vessel Core Temp High", "base_impact": 0.98},
+    {"tag": "PRESS-210", "desc": "Steam Header Pressure High", "base_impact": 0.88},
+    {"tag": "VALVE-204", "desc": "Main Steam Line Pressure Relief Open", "base_impact": 0.92},
 ]
 
 # Process-wide counter so event IDs stay unique across client reconnects
@@ -78,3 +83,9 @@ async def websocket_alarm_stream(websocket: WebSocket):
             await websocket.send_json(event.model_dump())
     except (WebSocketDisconnect, RuntimeError):
         print("Client disconnected from alarm stream.")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8000")))
