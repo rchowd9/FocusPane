@@ -11,4 +11,14 @@ export default defineConfig({
     // Transformers.js ships its own WASM/ONNX assets; let it resolve them at runtime
     exclude: ["@huggingface/transformers"],
   },
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          react: ["react", "react-dom"],
+          cytoscape: ["cytoscape"],
+        },
+      },
+    },
+  },
 });
