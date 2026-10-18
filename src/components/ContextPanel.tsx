@@ -1,6 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
 import { DocChunk } from "../rag/storage";
 
+type SearchResult = Omit<DocChunk, "embedding">;
+
 interface ContextPanelProps {
   selectedTag?: string;
   alarmDescription?: string;
@@ -11,39 +13,63 @@ export const ContextPanel: React.FC<ContextPanelProps> = ({
   alarmDescription,
 }) => {
   const workerRef = useRef<Worker | null>(null);
+  const latestRequestId = useRef<number>(0);
   const [modelReady, setModelReady] = useState<boolean>(false);
   const [loading, setLoading] = useState<boolean>(false);
-  const [results, setResults] = useState<DocChunk[]>([]);
+  const [results, setResults] = useState<SearchResult[]>([]);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     // Initialize Web Worker
-    workerRef.current = new Worker(new URL("../rag/worker.ts", import.meta.url), {
+    const worker = new Worker(new URL("../rag/worker.ts", import.meta.url), {
       type: "module",
     });
+    workerRef.current = worker;
 
-    workerRef.current.onmessage = (event: MessageEvent) => {
-      const { status, results, message } = event.data;
+    worker.onmessage = (event: MessageEvent) => {
+      const { status, results, requestId, error } = event.data;
       if (status === "READY") {
         setModelReady(true);
       } else if (status === "SEARCH_RESULTS") {
+        // Ignore responses to searches that have since been superseded
+        if (requestId !== latestRequestId.current) return;
         setResults(results);
+        setLoading(false);
+      } else if (status === "ERROR") {
+        if (requestId !== undefined && requestId !== latestRequestId.current) return;
+        setError(error ?? "Unknown error");
         setLoading(false);
       }
     };
 
-    workerRef.current.postMessage({ type: "INIT_MODEL" });
+    worker.onerror = (event: ErrorEvent) => {
+      setError(event.message || "RAG worker failed to start");
+      setLoading(false);
+    };
+
+    worker.postMessage({ type: "INIT_MODEL" });
 
     return () => {
-      workerRef.current?.terminate();
+      worker.terminate();
+      workerRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    if (modelReady && alarmDescription) {
+    if (!alarmDescription) {
+      latestRequestId.current++;
+      setResults([]);
+      setLoading(false);
+      return;
+    }
+    if (modelReady) {
+      const requestId = ++latestRequestId.current;
       setLoading(true);
+      setError(null);
       const query = selectedTag ? `${selectedTag} ${alarmDescription}` : alarmDescription;
       workerRef.current?.postMessage({
         type: "HYBRID_SEARCH",
+        requestId,
         payload: { query, topK: 3 },
       });
     }
@@ -66,7 +92,13 @@ export const ContextPanel: React.FC<ContextPanelProps> = ({
         <p className="text-sm text-slate-400">Select an alarm event to view local resolution context.</p>
       )}
 
+      {error && <p className="text-sm text-red-400">RAG error: {error}</p>}
+
       {loading && <p className="text-sm text-sky-400 animate-pulse">Searching manuals & historical logs...</p>}
+
+      {selectedTag && modelReady && !loading && !error && results.length === 0 && (
+        <p className="text-sm text-slate-400">No matching documents in the local index.</p>
+      )}
 
       {!loading && results.length > 0 && (
         <div className="space-y-3">

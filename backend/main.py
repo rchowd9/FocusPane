@@ -1,7 +1,7 @@
 import asyncio
+import itertools
 import random
 import time
-from typing import List
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -11,7 +11,7 @@ app = FastAPI(title="FocusPane SCADA Engine")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,  # wildcard origins cannot be combined with credentials
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -34,10 +34,24 @@ TAG_CATALOG = [
     {"tag": "ELEC-401", "desc": "Substation B Bus Voltage Sag", "base_impact": 0.60},
 ]
 
+# Process-wide counter so event IDs stay unique across client reconnects
+_event_ids = itertools.count(1001)
+
 def calculate_impact_score(base_impact: float) -> float:
     """Simulates a LightGBM gradient boosted impact scoring model."""
     noise = random.uniform(-0.05, 0.05)
     return round(max(0.1, min(1.0, base_impact + noise)), 2)
+
+@app.get("/")
+def root():
+    # The UI is served by the Vite dev server (npm run dev), not by this API
+    return {
+        "service": "FocusPane SCADA Engine",
+        "ui": "http://localhost:5173",
+        "health": "/api/health",
+        "alarm_stream": "ws://localhost:8000/ws/alarms",
+        "docs": "/docs",
+    }
 
 @app.get("/api/health")
 def health_check():
@@ -46,13 +60,12 @@ def health_check():
 @app.websocket("/ws/alarms")
 async def websocket_alarm_stream(websocket: WebSocket):
     await websocket.accept()
-    event_id = 1000
     try:
         while True:
             await asyncio.sleep(3.0)  # Stream new simulated event every 3s
             tag_data = random.choice(TAG_CATALOG)
-            event_id += 1
-            
+            event_id = next(_event_ids)
+
             event = AlarmEvent(
                 id=f"EVT-{event_id}",
                 tag=tag_data["tag"],
@@ -63,5 +76,5 @@ async def websocket_alarm_stream(websocket: WebSocket):
                 status="ACTIVE"
             )
             await websocket.send_json(event.model_dump())
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
         print("Client disconnected from alarm stream.")

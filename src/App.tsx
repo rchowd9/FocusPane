@@ -2,10 +2,14 @@ import React, { useEffect, useState } from "react";
 import { ContextPanel } from "./components/ContextPanel";
 import { TopologyGraph } from "./components/TopologyGraph";
 
+const ALARM_FEED_URL = "ws://localhost:8000/ws/alarms";
+const MAX_EVENTS = 200;
+const RECONNECT_DELAY_MS = 3000;
+
 export type UserRole = "Trainee" | "Operator" | "Supervisor";
 
 interface AlarmEvent {
-  id: str;
+  id: string;
   tag: string;
   description: string;
   raw_severity: string;
@@ -20,19 +24,43 @@ export default function App() {
   const [selectedEvent, setSelectedEvent] = useState<AlarmEvent | null>(null);
 
   useEffect(() => {
-    // Connect to Python FastAPI Alarm Feed
-    const ws = new WebSocket("ws://localhost:8000/ws/alarms");
+    let ws: WebSocket | null = null;
+    let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+    let disposed = false;
 
-    ws.onmessage = (msg) => {
-      const newEvent: AlarmEvent = JSON.parse(msg.data);
-      setEvents((prev) => {
-        const updated = [newEvent, ...prev];
-        // Sort by LightGBM impact score descending
-        return updated.sort((a, b) => b.impact_score - a.impact_score);
-      });
+    const connect = () => {
+      // Connect to Python FastAPI Alarm Feed
+      ws = new WebSocket(ALARM_FEED_URL);
+
+      ws.onmessage = (msg) => {
+        let newEvent: AlarmEvent;
+        try {
+          newEvent = JSON.parse(msg.data);
+        } catch {
+          console.warn("Dropping malformed alarm message:", msg.data);
+          return;
+        }
+        setEvents((prev) => {
+          const updated = [newEvent, ...prev.filter((e) => e.id !== newEvent.id)];
+          // Sort by LightGBM impact score descending, cap to avoid unbounded growth
+          return updated
+            .sort((a, b) => b.impact_score - a.impact_score)
+            .slice(0, MAX_EVENTS);
+        });
+      };
+
+      ws.onclose = () => {
+        if (!disposed) reconnectTimer = setTimeout(connect, RECONNECT_DELAY_MS);
+      };
     };
 
-    return () => ws.close();
+    connect();
+
+    return () => {
+      disposed = true;
+      clearTimeout(reconnectTimer);
+      ws?.close();
+    };
   }, []);
 
   return (

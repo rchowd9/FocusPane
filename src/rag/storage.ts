@@ -25,9 +25,16 @@ export function getDB(): Promise<IDBPDatabase<FocusPaneDB>> {
   if (!dbPromise) {
     dbPromise = openDB<FocusPaneDB>(DB_NAME, DB_VERSION, {
       upgrade(db) {
-        const store = db.createObjectStore("documents", { keyPath: "id" });
-        store.createIndex("by-tag", "tagReference");
+        // Guard so future version bumps don't fail on an existing store
+        if (!db.objectStoreNames.contains("documents")) {
+          const store = db.createObjectStore("documents", { keyPath: "id" });
+          store.createIndex("by-tag", "tagReference");
+        }
       },
+    }).catch((err) => {
+      // Don't cache a rejected open; allow the next call to retry
+      dbPromise = null;
+      throw err;
     });
   }
   return dbPromise;
@@ -36,10 +43,7 @@ export function getDB(): Promise<IDBPDatabase<FocusPaneDB>> {
 export async function saveDocChunks(chunks: DocChunk[]): Promise<void> {
   const db = await getDB();
   const tx = db.transaction("documents", "readwrite");
-  for (const chunk of chunks) {
-    await tx.store.put(chunk);
-  }
-  await tx.done;
+  await Promise.all([...chunks.map((chunk) => tx.store.put(chunk)), tx.done]);
 }
 
 export async function getAllDocChunks(): Promise<DocChunk[]> {
@@ -49,6 +53,7 @@ export async function getAllDocChunks(): Promise<DocChunk[]> {
 
 // Cosine Similarity between two vector arrays
 export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
   let dotProduct = 0;
   let normA = 0;
   let normB = 0;
@@ -61,22 +66,58 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
 }
 
-// Basic BM25 Keyword Scoring
-export function computeBM25Score(query: string, text: string): number {
-  const queryTerms = query.toLowerCase().split(/\W+/).filter(Boolean);
-  const textTerms = text.toLowerCase().split(/\W+/).filter(Boolean);
-  if (textTerms.length === 0) return 0;
+// Keeps hyphenated tag numbers like "PUMP-101A" together as a single token
+export function tokenize(text: string): string[] {
+  return text.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) ?? [];
+}
+
+export interface BM25CorpusStats {
+  docCount: number;
+  avgDocLength: number;
+  docFrequency: Map<string, number>;
+}
+
+export function buildBM25Stats(texts: string[]): BM25CorpusStats {
+  const docFrequency = new Map<string, number>();
+  let totalLength = 0;
+  for (const text of texts) {
+    const terms = tokenize(text);
+    totalLength += terms.length;
+    for (const term of new Set(terms)) {
+      docFrequency.set(term, (docFrequency.get(term) ?? 0) + 1);
+    }
+  }
+  return {
+    docCount: texts.length,
+    avgDocLength: texts.length > 0 ? totalLength / texts.length : 0,
+    docFrequency,
+  };
+}
+
+// BM25 Keyword Scoring (Okapi BM25 with corpus-derived IDF and average length)
+export function computeBM25Score(
+  query: string,
+  text: string,
+  stats: BM25CorpusStats
+): number {
+  const queryTerms = new Set(tokenize(query));
+  const textTerms = tokenize(text);
+  if (textTerms.length === 0 || stats.docCount === 0) return 0;
+
+  const termFreq = new Map<string, number>();
+  for (const t of textTerms) termFreq.set(t, (termFreq.get(t) ?? 0) + 1);
 
   let score = 0;
   const k1 = 1.2;
   const b = 0.75;
-  const avgdl = 50; // Average doc length heuristic
+  const avgdl = stats.avgDocLength || textTerms.length;
   const docLen = textTerms.length;
 
   for (const term of queryTerms) {
-    const tf = textTerms.filter((t) => t === term).length;
+    const tf = termFreq.get(term) ?? 0;
     if (tf > 0) {
-      const idf = Math.log(1 + 10 / 1); // Simplified IDF factor
+      const df = stats.docFrequency.get(term) ?? 0;
+      const idf = Math.log(1 + (stats.docCount - df + 0.5) / (df + 0.5));
       const num = tf * (k1 + 1);
       const denom = tf + k1 * (1 - b + b * (docLen / avgdl));
       score += idf * (num / denom);
@@ -100,8 +141,9 @@ export function reciprocalRankFusion(
 
   bm25Rankings.forEach((chunk, rank) => {
     const rrfScore = 1 / (k + (rank + 1));
-    if (scores.has(chunk.id)) {
-      scores.get(chunk.id)!.score += rrfScore;
+    const existing = scores.get(chunk.id);
+    if (existing) {
+      existing.score += rrfScore;
     } else {
       scores.set(chunk.id, { chunk, score: rrfScore });
     }

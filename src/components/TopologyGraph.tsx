@@ -69,6 +69,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag }) => 
 
     return () => {
       cyRef.current?.destroy();
+      cyRef.current = null;
     };
   }, []);
 
@@ -76,8 +77,9 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag }) => 
     if (!cyRef.current) return;
     cyRef.current.nodes().removeClass("highlighted");
     if (selectedTag) {
+      // getElementById returns an (always truthy) collection, so check its size
       const targetNode = cyRef.current.getElementById(selectedTag);
-      if (targetNode) {
+      if (targetNode.nonempty()) {
         targetNode.addClass("highlighted");
       }
     }

@@ -1,64 +1,99 @@
-import { pipeline, env } from "@xenova/transformers";
+import {
+  pipeline,
+  env,
+  FeatureExtractionPipeline,
+  ProgressCallback,
+} from "@huggingface/transformers";
 import {
   DocChunk,
   saveDocChunks,
   getAllDocChunks,
   cosineSimilarity,
+  buildBM25Stats,
   computeBM25Score,
   reciprocalRankFusion,
 } from "./storage";
+
+// Typed handle to the worker global scope (the DOM lib types `self` as Window)
+const ctx = self as unknown as Worker;
 
 // Allow local browser execution with WebGPU/WASM
 env.allowLocalModels = false;
 env.useBrowserCache = true;
 
-class PipelineSingleton {
-  static instance: any = null;
+const MODEL_ID = "Xenova/all-MiniLM-L6-v2";
 
-  static async getInstance(progressCallback?: Function) {
+// pipeline()'s overloads produce a union too complex for tsc; pin the one we use
+const loadFeatureExtractor = pipeline as (
+  task: "feature-extraction",
+  model: string,
+  options: { device: "webgpu" | "wasm"; progress_callback?: ProgressCallback }
+) => Promise<FeatureExtractionPipeline>;
+
+class PipelineSingleton {
+  // Cache the promise, not the result, so concurrent callers share one load
+  static instance: Promise<FeatureExtractionPipeline> | null = null;
+
+  static getInstance(progressCallback?: ProgressCallback): Promise<FeatureExtractionPipeline> {
     if (this.instance === null) {
-      this.instance = await pipeline(
-        "feature-extraction",
-        "Xenova/all-MiniLM-L6-v2",
-        {
-          device: "webgpu", // Default to WebGPU acceleration
-          progress_callback: progressCallback,
-        }
-      );
+      this.instance = this.load(progressCallback).catch((err) => {
+        this.instance = null;
+        throw err;
+      });
     }
     return this.instance;
   }
+
+  private static async load(progressCallback?: ProgressCallback): Promise<FeatureExtractionPipeline> {
+    const hasWebGPU = typeof navigator !== "undefined" && "gpu" in navigator;
+    if (hasWebGPU) {
+      try {
+        return await loadFeatureExtractor("feature-extraction", MODEL_ID, {
+          device: "webgpu", // Prefer WebGPU acceleration
+          progress_callback: progressCallback,
+        });
+      } catch (err) {
+        console.warn("WebGPU unavailable, falling back to WASM:", err);
+      }
+    }
+    return loadFeatureExtractor("feature-extraction", MODEL_ID, {
+      device: "wasm",
+      progress_callback: progressCallback,
+    });
+  }
 }
 
-self.addEventListener("message", async (event: MessageEvent) => {
-  const { type, payload } = event.data;
+async function embed(extractor: FeatureExtractionPipeline, text: string): Promise<number[]> {
+  const output = await extractor(text, { pooling: "mean", normalize: true });
+  return Array.from(output.data as Float32Array);
+}
+
+ctx.addEventListener("message", async (event: MessageEvent) => {
+  const { type, payload, requestId } = event.data;
 
   try {
     if (type === "INIT_MODEL") {
-      self.postMessage({ status: "LOADING", message: "Initializing WebGPU embedding model..." });
-      await PipelineSingleton.getInstance((progress: any) => {
-        self.postMessage({ status: "PROGRESS", progress });
+      ctx.postMessage({ status: "LOADING", message: "Initializing WebGPU embedding model..." });
+      await PipelineSingleton.getInstance((progress) => {
+        ctx.postMessage({ status: "PROGRESS", progress });
       });
-      self.postMessage({ status: "READY", message: "Model loaded successfully." });
+      ctx.postMessage({ status: "READY", message: "Model loaded successfully." });
     }
 
     if (type === "INDEX_DOCUMENTS") {
       const extractor = await PipelineSingleton.getInstance();
-      const chunks: { id: string; docTitle: string; content: string; tagReference?: string }[] = payload;
+      const chunks: Omit<DocChunk, "embedding">[] = payload;
 
       const processedChunks: DocChunk[] = [];
       for (const chunk of chunks) {
-        const output = await extractor(chunk.content, { pooling: "mean", normalize: true });
-        const embedding = Array.from(output.data) as number[];
-
         processedChunks.push({
           ...chunk,
-          embedding,
+          embedding: await embed(extractor, chunk.content),
         });
       }
 
       await saveDocChunks(processedChunks);
-      self.postMessage({ status: "INDEXED", count: processedChunks.length });
+      ctx.postMessage({ status: "INDEXED", count: processedChunks.length });
     }
 
     if (type === "HYBRID_SEARCH") {
@@ -66,25 +101,24 @@ self.addEventListener("message", async (event: MessageEvent) => {
       const extractor = await PipelineSingleton.getInstance();
 
       // 1. Generate Query Vector
-      const queryOutput = await extractor(query, { pooling: "mean", normalize: true });
-      const queryEmbedding = Array.from(queryOutput.data) as number[];
+      const queryEmbedding = await embed(extractor, query);
 
       // 2. Fetch Stored Chunks from IndexedDB
       const allChunks = await getAllDocChunks();
 
-      // 3. Vector Similarity Search
-      const vectorRanked = [...allChunks].sort((a, b) => {
-        const simA = cosineSimilarity(queryEmbedding, a.embedding);
-        const simB = cosineSimilarity(queryEmbedding, b.embedding);
-        return simB - simA;
-      });
+      // 3. Vector Similarity Search (score once, then sort)
+      const vectorRanked = allChunks
+        .map((chunk) => ({ chunk, score: cosineSimilarity(queryEmbedding, chunk.embedding) }))
+        .sort((a, b) => b.score - a.score)
+        .map((s) => s.chunk);
 
-      // 4. BM25 Keyword Search
-      const bm25Ranked = [...allChunks].sort((a, b) => {
-        const scoreA = computeBM25Score(query, a.content);
-        const scoreB = computeBM25Score(query, b.content);
-        return scoreB - scoreA;
-      });
+      // 4. BM25 Keyword Search (only chunks that actually match a query term)
+      const bm25Stats = buildBM25Stats(allChunks.map((c) => c.content));
+      const bm25Ranked = allChunks
+        .map((chunk) => ({ chunk, score: computeBM25Score(query, chunk.content, bm25Stats) }))
+        .filter((s) => s.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((s) => s.chunk);
 
       // 5. Reciprocal Rank Fusion (RRF)
       const fusedResults = reciprocalRankFusion(
@@ -92,12 +126,18 @@ self.addEventListener("message", async (event: MessageEvent) => {
         bm25Ranked.slice(0, 10)
       );
 
-      self.postMessage({
+      ctx.postMessage({
         status: "SEARCH_RESULTS",
-        results: fusedResults.slice(0, topK),
+        requestId,
+        // Embeddings aren't needed by the UI; avoid copying them across threads
+        results: fusedResults.slice(0, topK).map(({ embedding: _embedding, ...rest }) => rest),
       });
     }
-  } catch (error: any) {
-    self.postMessage({ status: "ERROR", error: error.message });
+  } catch (error) {
+    ctx.postMessage({
+      status: "ERROR",
+      requestId,
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
 });
