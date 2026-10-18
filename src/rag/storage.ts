@@ -51,6 +51,17 @@ export async function getAllDocChunks(): Promise<DocChunk[]> {
   return db.getAll("documents");
 }
 
+export async function getAllDocIds(): Promise<string[]> {
+  const db = await getDB();
+  return db.getAllKeys("documents");
+}
+
+export async function deleteDocChunks(ids: string[]): Promise<void> {
+  const db = await getDB();
+  const tx = db.transaction("documents", "readwrite");
+  await Promise.all([...ids.map((id) => tx.store.delete(id)), tx.done]);
+}
+
 // Cosine Similarity between two vector arrays
 export function cosineSimilarity(a: number[], b: number[]): number {
   if (a.length !== b.length || a.length === 0) return 0;

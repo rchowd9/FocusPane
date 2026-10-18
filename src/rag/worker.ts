@@ -8,11 +8,14 @@ import {
   DocChunk,
   saveDocChunks,
   getAllDocChunks,
+  getAllDocIds,
+  deleteDocChunks,
   cosineSimilarity,
   buildBM25Stats,
   computeBM25Score,
   reciprocalRankFusion,
 } from "./storage";
+import { SEED_DOCS, SEED_PREFIX } from "./seedDocs";
 
 // Typed handle to the worker global scope (the DOM lib types `self` as Window)
 const ctx = self as unknown as Worker;
@@ -68,32 +71,51 @@ async function embed(extractor: FeatureExtractionPipeline, text: string): Promis
   return Array.from(output.data as Float32Array);
 }
 
+async function indexChunks(
+  extractor: FeatureExtractionPipeline,
+  chunks: Omit<DocChunk, "embedding">[]
+): Promise<number> {
+  const processedChunks: DocChunk[] = [];
+  for (const chunk of chunks) {
+    processedChunks.push({ ...chunk, embedding: await embed(extractor, chunk.content) });
+  }
+  await saveDocChunks(processedChunks);
+  return processedChunks.length;
+}
+
+// Index the bundled sample manuals once, and drop chunks from older seed versions
+async function ensureSeedIndex(extractor: FeatureExtractionPipeline): Promise<void> {
+  const existing = await getAllDocIds();
+  const current = new Set(SEED_DOCS.map((d) => d.id));
+  const stale = existing.filter((id) => id.startsWith("seed-") && !current.has(id));
+  if (stale.length > 0) await deleteDocChunks(stale);
+
+  const have = new Set(existing);
+  const missing = SEED_DOCS.filter((d) => !have.has(d.id));
+  if (missing.length === 0) return;
+
+  ctx.postMessage({ status: "INDEXING", message: `Indexing ${missing.length} sample documents...` });
+  await indexChunks(extractor, missing);
+}
+
 ctx.addEventListener("message", async (event: MessageEvent) => {
   const { type, payload, requestId } = event.data;
 
   try {
     if (type === "INIT_MODEL") {
       ctx.postMessage({ status: "LOADING", message: "Initializing WebGPU embedding model..." });
-      await PipelineSingleton.getInstance((progress) => {
+      const extractor = await PipelineSingleton.getInstance((progress) => {
         ctx.postMessage({ status: "PROGRESS", progress });
       });
-      ctx.postMessage({ status: "READY", message: "Model loaded successfully." });
+      await ensureSeedIndex(extractor);
+      const docCount = (await getAllDocIds()).length;
+      ctx.postMessage({ status: "READY", docCount, message: "Model loaded successfully." });
     }
 
     if (type === "INDEX_DOCUMENTS") {
       const extractor = await PipelineSingleton.getInstance();
-      const chunks: Omit<DocChunk, "embedding">[] = payload;
-
-      const processedChunks: DocChunk[] = [];
-      for (const chunk of chunks) {
-        processedChunks.push({
-          ...chunk,
-          embedding: await embed(extractor, chunk.content),
-        });
-      }
-
-      await saveDocChunks(processedChunks);
-      ctx.postMessage({ status: "INDEXED", count: processedChunks.length });
+      const count = await indexChunks(extractor, payload);
+      ctx.postMessage({ status: "INDEXED", count });
     }
 
     if (type === "HYBRID_SEARCH") {
@@ -114,11 +136,12 @@ ctx.addEventListener("message", async (event: MessageEvent) => {
 
       // 4. BM25 Keyword Search (only chunks that actually match a query term)
       const bm25Stats = buildBM25Stats(allChunks.map((c) => c.content));
-      const bm25Ranked = allChunks
+      const bm25Scored = allChunks
         .map((chunk) => ({ chunk, score: computeBM25Score(query, chunk.content, bm25Stats) }))
         .filter((s) => s.score > 0)
-        .sort((a, b) => b.score - a.score)
-        .map((s) => s.chunk);
+        .sort((a, b) => b.score - a.score);
+      const bm25Ranked = bm25Scored.map((s) => s.chunk);
+      const keywordHits = new Set(bm25Ranked.map((c) => c.id));
 
       // 5. Reciprocal Rank Fusion (RRF)
       const fusedResults = reciprocalRankFusion(
@@ -130,7 +153,10 @@ ctx.addEventListener("message", async (event: MessageEvent) => {
         status: "SEARCH_RESULTS",
         requestId,
         // Embeddings aren't needed by the UI; avoid copying them across threads
-        results: fusedResults.slice(0, topK).map(({ embedding: _embedding, ...rest }) => rest),
+        results: fusedResults.slice(0, topK).map(({ embedding: _embedding, ...rest }) => ({
+          ...rest,
+          keywordMatch: keywordHits.has(rest.id),
+        })),
       });
     }
   } catch (error) {
