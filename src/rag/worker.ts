@@ -103,7 +103,7 @@ ctx.addEventListener("message", async (event: MessageEvent) => {
 
   try {
     if (type === "INIT_MODEL") {
-      ctx.postMessage({ status: "LOADING", message: "Initializing WebGPU embedding model..." });
+      ctx.postMessage({ status: "LOADING", message: "Initializing embedding model..." });
       const extractor = await PipelineSingleton.getInstance((progress) => {
         ctx.postMessage({ status: "PROGRESS", progress });
       });
