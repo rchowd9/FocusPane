@@ -48,5 +48,6 @@ export function downloadText(filename: string, text: string): void {
   link.href = url;
   link.download = filename;
   link.click();
-  URL.revokeObjectURL(url);
+  // Revoke after the click has been handled so the download isn't cancelled
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
