@@ -114,7 +114,13 @@ export const ContextPanel: React.FC<ContextPanelProps> = ({
             modelReady ? "bg-emerald-900 text-emerald-300" : "bg-amber-900 text-amber-300"
           }`}
         >
-          {modelReady ? `Local RAG · ${docCount} docs` : percent > 0 && percent < 100 ? `Downloading model ${percent}%` : "Starting..."}
+          {modelReady
+            ? `Local RAG · ${docCount} docs`
+            : percent > 0 && percent < 100
+              ? `Downloading model ${percent}%`
+              : percent >= 100
+                ? "Initializing..."
+                : "Starting..."}
         </span>
       </div>
 

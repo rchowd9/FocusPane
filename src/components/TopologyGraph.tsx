@@ -10,6 +10,30 @@ interface TopologyGraphProps {
 }
 
 const CRITICAL_IMPACT = 0.8;
+const COLUMN_SPACING = 150;
+const ROW_SPACING = 90;
+
+// Left-to-right flow layout: column = longest upstream path, rows centred per column
+function computePositions(): Map<string, { x: number; y: number }> {
+  const depth = new Map(TAG_CATALOG.map(({ tag }) => [tag, 0]));
+  for (let pass = 0; pass < TAG_CATALOG.length; pass++) {
+    for (const [source, target] of TOPOLOGY) {
+      depth.set(target, Math.max(depth.get(target)!, depth.get(source)! + 1));
+    }
+  }
+  const columns = new Map<number, string[]>();
+  for (const { tag } of TAG_CATALOG) {
+    const d = depth.get(tag)!;
+    columns.set(d, [...(columns.get(d) ?? []), tag]);
+  }
+  const positions = new Map<string, { x: number; y: number }>();
+  for (const [d, tags] of columns) {
+    tags.forEach((tag, i) => {
+      positions.set(tag, { x: d * COLUMN_SPACING, y: (i - (tags.length - 1) / 2) * ROW_SPACING });
+    });
+  }
+  return positions;
+}
 
 export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag, tagImpact, onSelectTag }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -21,6 +45,7 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag, tagIm
   useEffect(() => {
     if (!containerRef.current) return;
 
+    const positions = computePositions();
     const cy = cytoscape({
       container: containerRef.current,
       style: [
@@ -63,16 +88,13 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag, tagIm
         },
       ],
       elements: [
-        ...TAG_CATALOG.map(({ tag }) => ({ data: { id: tag, label: tag } })),
+        ...TAG_CATALOG.map(({ tag }) => ({ data: { id: tag, label: tag }, position: positions.get(tag) })),
         ...TOPOLOGY.map(([source, target]) => ({ data: { source, target } })),
       ],
-      layout: {
-        name: "breadthfirst",
-        directed: true,
-        spacingFactor: 1.1,
-        padding: 24,
-      },
+      layout: { name: "preset", fit: true, padding: 36 },
       userZoomingEnabled: false,
+      userPanningEnabled: false,
+      autoungrabify: true,
       boxSelectionEnabled: false,
     });
 
@@ -81,7 +103,10 @@ export const TopologyGraph: React.FC<TopologyGraphProps> = ({ selectedTag, tagIm
       if (evt.target === cy) onSelectRef.current(undefined);
     });
 
-    const onResize = () => cy.fit(undefined, 24);
+    const onResize = () => {
+      cy.resize();
+      cy.fit(undefined, 36);
+    };
     window.addEventListener("resize", onResize);
     cyRef.current = cy;
 
