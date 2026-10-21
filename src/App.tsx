@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ContextPanel } from "./components/ContextPanel";
 import { TopologyGraph } from "./components/TopologyGraph";
 import { FEED_ENDPOINT, FEED_MODE, useAlarmFeed } from "./feed/useAlarmFeed";
@@ -11,18 +11,56 @@ const MAX_VISIBLE_EVENTS = 200;
 const REPLAY_WINDOW_MIN = 10;
 const ROLES: UserRole[] = ["Trainee", "Operator", "Supervisor"];
 
+const STORAGE_KEYS = {
+  role: "focuspane-role",
+  selectedId: "focuspane-selected-id",
+  tagFilter: "focuspane-tag-filter",
+  replayMinutes: "focuspane-replay-minutes",
+} as const;
+
+function readStoredValue<T>(key: string, fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) return fallback;
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStoredValue<T>(key: string, value: T) {
+  if (typeof window === "undefined") return;
+
+  try {
+    if (value == null || value === "") {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Ignore storage errors in private browsing or restricted environments.
+  }
+}
+
 function formatClock(seconds: number): string {
   return new Date(seconds * 1000).toLocaleTimeString([], { hour12: false });
 }
 
 export default function App() {
   const { alarms, status, acknowledge } = useAlarmFeed();
-  const [role, setRole] = useState<UserRole>("Operator");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [tagFilter, setTagFilter] = useState<string | undefined>();
+  const [role, setRole] = useState<UserRole>(() => readStoredValue(STORAGE_KEYS.role, "Operator"));
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    readStoredValue<string | null>(STORAGE_KEYS.selectedId, null)
+  );
+  const [tagFilter, setTagFilter] = useState<string | undefined>(() =>
+    readStoredValue<string | undefined>(STORAGE_KEYS.tagFilter, undefined)
+  );
   // Minutes rewound from "now" and the frozen cutoff time (Unix seconds); 0 / null = live
-  const [replayMinutes, setReplayMinutes] = useState<number>(0);
-  const [replayCutoff, setReplayCutoff] = useState<number | null>(null);
+  const [replayMinutes, setReplayMinutes] = useState<number>(() =>
+    readStoredValue<number>(STORAGE_KEYS.replayMinutes, 0)
+  );
 
   const isReplay = replayCutoff !== null;
 
