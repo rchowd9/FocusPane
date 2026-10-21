@@ -61,6 +61,14 @@ export default function App() {
   const [replayMinutes, setReplayMinutes] = useState<number>(() =>
     readStoredValue<number>(STORAGE_KEYS.replayMinutes, 0)
   );
+  const [replayCutoff, setReplayCutoff] = useState<number | null>(null);
+
+  useEffect(() => {
+    writeStoredValue(STORAGE_KEYS.role, role);
+    writeStoredValue(STORAGE_KEYS.selectedId, selectedId);
+    writeStoredValue(STORAGE_KEYS.tagFilter, tagFilter ?? "");
+    writeStoredValue(STORAGE_KEYS.replayMinutes, replayMinutes);
+  }, [role, selectedId, tagFilter, replayMinutes]);
 
   const isReplay = replayCutoff !== null;
 
@@ -103,6 +111,46 @@ export default function App() {
   const activeCount = view.filter((a) => a.status === "ACTIVE").length;
   const criticalCount = view.filter((a) => a.status === "ACTIVE" && a.impact_score > 0.8).length;
   const selectedEvent = view.find((a) => a.id === selectedId) ?? null;
+
+  useEffect(() => {
+    if (selectedId && !view.some((a) => a.id === selectedId)) {
+      setSelectedId(null);
+    }
+  }, [selectedId, view]);
+
+  const focusNextAlarm = () => {
+    const nextAlarm =
+      queue.find((a) => a.status === "ACTIVE" && a.impact_score > 0.8) ??
+      queue.find((a) => a.status === "ACTIVE") ??
+      null;
+
+    if (!nextAlarm) return;
+
+    setSelectedId(nextAlarm.id);
+    setTagFilter(nextAlarm.tag);
+  };
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      const isTypingField = event.target instanceof HTMLElement && ["INPUT", "TEXTAREA"].includes(event.target.tagName);
+      if (isTypingField) return;
+
+      if (event.key.toLowerCase() === "n") {
+        event.preventDefault();
+        focusNextAlarm();
+        return;
+      }
+
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setTagFilter(undefined);
+        setSelectedId(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [focusNextAlarm]);
 
   const handleReplayChange = (minutesBack: number) => {
     setReplayMinutes(minutesBack);
