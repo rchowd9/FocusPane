@@ -314,6 +314,14 @@ export default function App() {
                 ) : (
                   <div className="space-y-2">
                     <button
+                      type="button"
+                      onClick={focusNextAlarm}
+                      disabled={queue.every((a) => a.status !== "ACTIVE")}
+                      className="w-full py-1.5 bg-sky-700 hover:bg-sky-600 disabled:bg-slate-800 disabled:text-slate-500 disabled:cursor-not-allowed text-white text-xs font-medium rounded transition"
+                    >
+                      Focus Next Critical Alarm
+                    </button>
+                    <button
                       disabled={!selectedEvent || isReplay}
                       onClick={() => selectedEvent && acknowledgeTag(selectedEvent.tag)}
                       title={isReplay ? "Return to live view to take actions" : undefined}
