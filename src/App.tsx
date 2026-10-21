@@ -61,7 +61,10 @@ export default function App() {
   const [replayMinutes, setReplayMinutes] = useState<number>(() =>
     readStoredValue<number>(STORAGE_KEYS.replayMinutes, 0)
   );
-  const [replayCutoff, setReplayCutoff] = useState<number | null>(null);
+  const [replayCutoff, setReplayCutoff] = useState<number | null>(() => {
+    const savedMinutes = readStoredValue<number>(STORAGE_KEYS.replayMinutes, 0);
+    return savedMinutes === 0 ? null : Date.now() / 1000 - savedMinutes * 60;
+  });
 
   useEffect(() => {
     writeStoredValue(STORAGE_KEYS.role, role);
