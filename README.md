@@ -36,6 +36,12 @@ npm run dev
 
 Open <http://localhost:5173>. With no configuration, the UI runs the **built-in alarm simulator**, so no backend is needed.
 
+### Productivity shortcuts
+
+- `N` jumps to the next critical or highest-impact active alarm.
+- `Esc` clears the current tag filter and selection.
+- The active role, selected tag and replay minute offset are persisted in the browser so your control-room context survives refreshes.
+
 The first visit downloads the embedding model from the Hugging Face Hub. The browser caches it, and every later search runs offline on your machine.
 
 ### Optional: stream from the Python backend
